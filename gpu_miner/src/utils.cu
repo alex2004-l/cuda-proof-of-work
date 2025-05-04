@@ -90,18 +90,44 @@ __host__ __device__ int compare_hashes(BYTE* hash1, BYTE* hash2) {
     return 0; // hashes are equal
 }
 
-// TODO 1: Implement this function in CUDA
-void construct_merkle_root(int transaction_size, BYTE *transactions, int max_transactions_in_a_block, int n, BYTE merkle_root[SHA256_HASH_SIZE]) {
+// Function for computing the SHA256 hash for a transation
+__global__ void compute_transaction(int transaction_size, BYTE *transactions, BYTE (*hashes)[SHA256_HASH_SIZE], int n) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (i < n) {
+        apply_sha256(transactions + i * transaction_size, hashes[i]);
+    }
+}
+
+// Construction for Merkle tree in CUDA
+void construct_merkle_root(int transaction_size, BYTE *transactions, int max_transactions_in_a_block, int n, BYTE merkle_root[SHA256_HASH_SIZE]){
     BYTE (*hashes)[SHA256_HASH_SIZE] = (BYTE (*)[SHA256_HASH_SIZE])malloc(max_transactions_in_a_block * SHA256_HASH_SIZE);
+
     if (!hashes) {
         fprintf(stderr, "Error: Unable to allocate memory for hashes\n");
         exit(EXIT_FAILURE);
     }
 
     // Compute the SHA256 hash for each transaction
-    for (int i = 0; i < n; i++) {
-        apply_sha256(transactions + i * transaction_size, hashes[i]);
-    }
+    // parallel implementation of compute transaction
+    BYTE *device_transactions = 0;
+    BYTE (*device_hashes)[SHA256_HASH_SIZE] = 0;
+
+    cudaMalloc((void **)&device_transactions, transaction_size * n);
+    cudaMalloc((void **)&device_hashes, max_transactions_in_a_block * SHA256_HASH_SIZE);
+
+    const size_t block_size = 256;
+    size_t blocks_no = n / block_size;
+
+    if (n % block_size) 
+        ++blocks_no;
+    
+    cudaMemcpy(device_transactions, transactions, transaction_size * n, cudaMemcpyHostToDevice);
+    
+    compute_transaction<<<blocks_no, block_size>>>(transaction_size, device_transactions, device_hashes, n);
+
+    cudaMemcpy(hashes, device_hashes, n * SHA256_HASH_SIZE, cudaMemcpyDeviceToHost);
+
 
     // Build the Merkle tree
     while (n > 1) {
@@ -124,6 +150,9 @@ void construct_merkle_root(int transaction_size, BYTE *transactions, int max_tra
     memcpy(merkle_root, hashes[0], SHA256_HASH_SIZE);
 
     free(hashes);
+
+    cudaFree(device_transactions);
+    cudaFree(device_hashes);
 }
 
 // TODO 2: Implement this function in CUDA
