@@ -132,12 +132,12 @@ void construct_merkle_root(int transaction_size, BYTE *transactions, int max_tra
     cudaMalloc((void **)&device_transactions, transaction_size * n);
     cudaMalloc((void **)&device_hashes, max_transactions_in_a_block * SHA256_HASH_SIZE);
 
-    const size_t block_size = 256;
+    const size_t block_size = 126;
     size_t blocks_no = n / block_size;
 
     if (n % block_size) 
         ++blocks_no;
-    
+
     cudaMemcpy(device_transactions, transactions, transaction_size * n, cudaMemcpyHostToDevice);
 
     compute_transaction<<<blocks_no, block_size>>>(transaction_size, device_transactions, device_hashes, n);
@@ -163,15 +163,10 @@ void construct_merkle_root(int transaction_size, BYTE *transactions, int max_tra
     cudaFree(device_hashes);
 }
 
-__global__ void find_n(BYTE *difficulty, uint32_t max_nonce, BYTE *block_content, size_t current_length, BYTE *block_hash, uint32_t *valid_nonce, int* found) {
-    if (*found) {
-        return;
-    }
 
+__global__ void calculate_nonce(BYTE *difficulty, uint32_t max_nonce, BYTE *block_content, size_t current_length, BYTE *block_hash, uint32_t *valid_nonce, int* found){
     uint32_t idx = threadIdx.x +  blockIdx.x * blockDim.x;
-    if (idx > max_nonce) {
-        return;
-    }
+    uint32_t stride = blockDim.x * gridDim.x;
 
     char local_block_content[BLOCK_SIZE];
     char local_block_hash[SHA256_BLOCK_SIZE];
@@ -179,14 +174,17 @@ __global__ void find_n(BYTE *difficulty, uint32_t max_nonce, BYTE *block_content
 
     d_strcpy(local_block_content, (char *)block_content);
 
-    intToString(idx, nonce_string);
-    d_strcpy((char *)local_block_content + current_length, nonce_string);
-    apply_sha256((BYTE *)local_block_content, (BYTE *)local_block_hash);
+    for (uint32_t i = idx; i <= max_nonce && *found == 0; i += stride) {
+        intToString(i, nonce_string);
+        d_strcpy((char *)local_block_content + current_length, nonce_string);
+        apply_sha256((BYTE *)local_block_content, (BYTE *)local_block_hash);
 
-    if (compare_hashes((BYTE *)local_block_hash, difficulty) <= 0) {
-        if (atomicExch(found, 1) == 0) {
-            *valid_nonce = idx;
-            d_strcpy((char *) block_hash, local_block_hash);
+        if (compare_hashes((BYTE *)local_block_hash, difficulty) <= 0) {
+            if (atomicExch(found, 1) == 0) {
+                *valid_nonce = i;
+                d_strcpy((char *) block_hash, local_block_hash);
+                return;
+            }
         }
     }
 }
@@ -212,13 +210,14 @@ int find_nonce(BYTE *difficulty, uint32_t max_nonce, BYTE *block_content, size_t
     cudaMemcpy(device_difficulty, difficulty, SHA256_HASH_SIZE, cudaMemcpyHostToDevice);
     cudaMemcpy(device_block_content, block_content, BLOCK_SIZE, cudaMemcpyHostToDevice);
 
-    const size_t block_size = 512;
-    size_t blocks_no = max_nonce / block_size;
+    const size_t block_size = 64;
+    // size_t blocks_no = max_nonce / block_size;
 
-    if (max_nonce % block_size) 
-        ++blocks_no;
+    // if (max_nonce % block_size) 
+    //     ++blocks_no;
 
-    find_n<<<blocks_no, block_size>>>(device_difficulty, max_nonce, device_block_content, current_length, device_block_hash, device_valid_nonce, device_found);
+    calculate_nonce<<<2048, block_size>>>(device_difficulty, max_nonce, device_block_content, current_length, device_block_hash, device_valid_nonce, device_found);
+    cudaDeviceSynchronize();
 
     cudaMemcpy(block_hash, device_block_hash, SHA256_HASH_SIZE, cudaMemcpyDeviceToHost);
     cudaMemcpy(valid_nonce, device_valid_nonce, sizeof(uint32_t), cudaMemcpyDeviceToHost);
