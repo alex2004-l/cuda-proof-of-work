@@ -99,7 +99,7 @@ __global__ void compute_transaction(int transaction_size, BYTE *transactions, BY
     }
 }
 
-__global__ void build_merkle_tree(BYTE (*hashes)[SHA256_HASH_SIZE], int n) {
+__global__ void build_merkle_tree(BYTE (*hashes)[SHA256_HASH_SIZE], int n, BYTE (*results)[SHA256_HASH_SIZE]) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (2 * i < n) {
@@ -111,7 +111,7 @@ __global__ void build_merkle_tree(BYTE (*hashes)[SHA256_HASH_SIZE], int n) {
             d_strcpy((char *)combined, (const char *)hashes[2 * i]);
             d_strcat((char *)combined, (const char *)hashes[2 * i]);
         }
-        apply_sha256(combined, hashes[i]);
+        apply_sha256(combined, results[i]);
     }
 }
 
@@ -128,9 +128,12 @@ void construct_merkle_root(int transaction_size, BYTE *transactions, int max_tra
     // parallel implementation of compute transaction
     BYTE *device_transactions = 0;
     BYTE (*device_hashes)[SHA256_HASH_SIZE] = 0;
+    BYTE (*device_hashes_results)[SHA256_HASH_SIZE] = 0;
+    BYTE (*device_auxiliary_buffer)[SHA256_HASH_SIZE] = 0;
 
     cudaMalloc((void **)&device_transactions, transaction_size * n);
     cudaMalloc((void **)&device_hashes, max_transactions_in_a_block * SHA256_HASH_SIZE);
+    cudaMalloc((void **)&device_hashes_results, ceil(max_transactions_in_a_block * SHA256_HASH_SIZE/2.0));
 
     const size_t block_size = 126;
     size_t blocks_no = n / block_size;
@@ -148,15 +151,20 @@ void construct_merkle_root(int transaction_size, BYTE *transactions, int max_tra
         if (n % block_size) 
             ++blocks_no;
         
-        build_merkle_tree<<<blocks_no, block_size>>>(device_hashes, n);
+        build_merkle_tree<<<blocks_no, block_size>>>(device_hashes, n, device_hashes_results);
         cudaDeviceSynchronize();
+
+        // Swap the buffers between them
+        device_auxiliary_buffer = device_hashes;
+        device_hashes = device_hashes_results;
+        device_hashes_results = device_auxiliary_buffer;
+
         n = (n + 1) / 2;
     }
 
     cudaMemcpy(hashes, device_hashes, n * SHA256_HASH_SIZE, cudaMemcpyDeviceToHost);
 
     memcpy(merkle_root, hashes[0], SHA256_HASH_SIZE);
-
     free(hashes);
 
     cudaFree(device_transactions);
@@ -211,10 +219,6 @@ int find_nonce(BYTE *difficulty, uint32_t max_nonce, BYTE *block_content, size_t
     cudaMemcpy(device_block_content, block_content, BLOCK_SIZE, cudaMemcpyHostToDevice);
 
     const size_t block_size = 64;
-    // size_t blocks_no = max_nonce / block_size;
-
-    // if (max_nonce % block_size) 
-    //     ++blocks_no;
 
     calculate_nonce<<<2048, block_size>>>(device_difficulty, max_nonce, device_block_content, current_length, device_block_hash, device_valid_nonce, device_found);
     cudaDeviceSynchronize();
